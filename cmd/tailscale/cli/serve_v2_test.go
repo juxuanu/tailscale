@@ -1067,6 +1067,93 @@ func TestServeDevConfigMutations(t *testing.T) {
 			}},
 		},
 		{
+			name: "funnel_custom_domain",
+			steps: []step{
+				{
+					command: cmd("funnel --bg 3000"),
+					want: &ipn.ServeConfig{
+						TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://127.0.0.1:3000"},
+							}},
+						},
+						AllowFunnel: map[ipn.HostPort]bool{"foo.test.ts.net:443": true},
+					},
+				},
+				{ // add a custom domain alongside the node's own name; normalized
+					command: cmd("funnel --bg --domain=WWW.Example.com. localhost:4000"),
+					want: &ipn.ServeConfig{
+						TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://127.0.0.1:3000"},
+							}},
+							"www.example.com:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://localhost:4000"},
+							}},
+						},
+						AllowFunnel: map[ipn.HostPort]bool{
+							"foo.test.ts.net:443": true,
+							"www.example.com:443": true,
+						},
+					},
+				},
+				{ // removing the custom domain keeps port 443 for the node's name
+					command: cmd("funnel --domain=www.example.com off"),
+					want: &ipn.ServeConfig{
+						TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://127.0.0.1:3000"},
+							}},
+						},
+						AllowFunnel: map[ipn.HostPort]bool{"foo.test.ts.net:443": true},
+					},
+				},
+				{ // and vice versa
+					command: cmd("funnel --bg --domain=www.example.com localhost:4000"),
+					want: &ipn.ServeConfig{
+						TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://127.0.0.1:3000"},
+							}},
+							"www.example.com:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://localhost:4000"},
+							}},
+						},
+						AllowFunnel: map[ipn.HostPort]bool{
+							"foo.test.ts.net:443": true,
+							"www.example.com:443": true,
+						},
+					},
+				},
+				{
+					command: cmd("funnel --https=443 off"),
+					want: &ipn.ServeConfig{
+						TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"www.example.com:443": {Handlers: map[string]*ipn.HTTPHandler{
+								"/": {Proxy: "http://localhost:4000"},
+							}},
+						},
+						AllowFunnel: map[ipn.HostPort]bool{"www.example.com:443": true},
+					},
+				},
+			},
+		},
+		{
+			name: "funnel_custom_domain_errors",
+			steps: []step{
+				{command: cmd("funnel --bg --domain=www.example.com --https=8443 3000"), wantErr: anyErr()},
+				{command: cmd("funnel --bg --domain=www.example.com --tcp=443 tcp://localhost:5432"), wantErr: anyErr()},
+				{command: cmd("funnel --bg --domain=*.example.com 3000"), wantErr: anyErr()},
+				{command: cmd("funnel --bg --domain=bar.test.ts.net 3000"), wantErr: anyErr()},
+				{command: cmd("serve --bg --domain=www.example.com 3000"), wantErr: anyErr()},
+			},
+		},
+		{
 			name: "proxy_protocol_without_tcp",
 			steps: []step{{
 				command: cmd("serve --https=443 --proxy-protocol=1 --bg http://localhost:3000"),
@@ -1467,6 +1554,7 @@ func TestMessageForPort(t *testing.T) {
 		serveConfig *ipn.ServeConfig
 		status      *ipnstate.Status
 		prefs       *ipn.Prefs
+		domain      string // --domain flag value
 		dnsName     string
 		srvType     serveType
 		srvPort     uint16
@@ -1502,6 +1590,39 @@ func TestMessageForPort(t *testing.T) {
 				"",
 				fmt.Sprintf(msgRunningInBackground, "Funnel"),
 				fmt.Sprintf(msgDisableProxy, "funnel", "https", 443),
+			}, "\n"),
+		},
+		{
+			name:   "funnel-custom-domain",
+			subcmd: funnel,
+			serveConfig: &ipn.ServeConfig{
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					443: {HTTPS: true},
+				},
+				Web: map[ipn.HostPort]*ipn.WebServerConfig{
+					"www.example.com:443": {
+						Handlers: map[string]*ipn.HTTPHandler{
+							"/": {Proxy: "http://127.0.0.1:3000"},
+						},
+					},
+				},
+				AllowFunnel: map[ipn.HostPort]bool{
+					"www.example.com:443": true,
+				},
+			},
+			status:  &ipnstate.Status{CurrentTailnet: &ipnstate.TailnetStatus{MagicDNSSuffix: "test.ts.net"}},
+			domain:  "www.example.com",
+			dnsName: "www.example.com",
+			srvType: serveTypeHTTPS,
+			srvPort: 443,
+			expected: strings.Join([]string{
+				msgFunnelAvailable,
+				"",
+				"https://www.example.com/",
+				"|-- proxy http://127.0.0.1:3000",
+				"",
+				fmt.Sprintf(msgRunningInBackground, "Funnel"),
+				fmt.Sprintf(msgDisableDomainProxy, "www.example.com"),
 			}, "\n"),
 		},
 		{
@@ -1732,7 +1853,7 @@ func TestMessageForPort(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		e := &serveEnv{bg: bgBoolFlag{true, false}, subcmd: tt.subcmd}
+		e := &serveEnv{bg: bgBoolFlag{true, false}, subcmd: tt.subcmd, domain: tt.domain}
 
 		t.Run(tt.name, func(t *testing.T) {
 			actual := e.messageForPort(tt.serveConfig, tt.status, tt.dnsName, tt.srvType, tt.srvPort)
@@ -2736,4 +2857,40 @@ func TestRunServeSetConfig(t *testing.T) {
 			t.Errorf("get-config output missing https-over-unix target:\n%s", gotStdout.String())
 		}
 	})
+}
+
+func TestValidateFunnelDomain(t *testing.T) {
+	st := &ipnstate.Status{
+		CurrentTailnet: &ipnstate.TailnetStatus{MagicDNSSuffix: "tail1234.ts.net"},
+		CertDomains:    []string{"node.tail1234.ts.net"},
+	}
+	tests := []struct {
+		domain  string
+		want    string
+		wantErr bool
+	}{
+		{domain: "example.com", want: "example.com"},
+		{domain: "WWW.Example.COM.", want: "www.example.com"},
+		{domain: "a.b.example.co.uk", want: "a.b.example.co.uk"},
+		{domain: "localhost", wantErr: true},
+		{domain: "*.example.com", wantErr: true},
+		{domain: "1.2.3.4", wantErr: true},
+		{domain: "::1", wantErr: true},
+		{domain: "foo_bar.example.com", wantErr: true},
+		{domain: "node.tail1234.ts.net", wantErr: true},
+		{domain: "x.node.tail1234.ts.net", wantErr: true},
+		{domain: "other.ts.net", wantErr: true},
+		{domain: "ts.net", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.domain, func(t *testing.T) {
+			got, err := validateFunnelDomain(tt.domain, st)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateFunnelDomain(%q) error = %v, wantErr %v", tt.domain, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("validateFunnelDomain(%q) = %q, want %q", tt.domain, got, tt.want)
+			}
+		})
+	}
 }

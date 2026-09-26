@@ -15,6 +15,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -247,6 +248,9 @@ func newServeV2Command(e *serveEnv, subcmd serveMode) *ffcli.Command {
 				fs.Var(&serviceNameFlag{Value: &e.service}, "service", "Serve for a service with distinct virtual IP instead on node itself.")
 				fs.BoolVar(&e.tun, "tun", false, "Forward all traffic to the local machine (default false), only supported for services. Refer to docs for more information.")
 			}
+			if subcmd == funnel {
+				fs.StringVar(&e.domain, "domain", "", "Serve on a custom domain you own (e.g. www.example.com) instead of this node's MagicDNS name; HTTPS on port 443 only")
+			}
 			fs.UintVar(&e.tcp, "tcp", 0, "Expose a TCP forwarder to forward raw TCP packets at the specified port")
 			fs.UintVar(&e.tlsTerminatedTCP, "tls-terminated-tcp", 0, "Expose a TCP forwarder to forward TLS-terminated TCP packets at the specified port")
 			fs.UintVar(&e.proxyProtocol, "proxy-protocol", 0, "PROXY protocol version (1 or 2) for TCP forwarding")
@@ -413,6 +417,9 @@ func (e *serveEnv) runServeCombined(subcmd serveMode) execFunc {
 				return err
 			}
 		}
+		// --domain is only registered for funnel, so a non-empty value
+		// implies funnel mode.
+		forDomain := e.domain != ""
 
 		if forService && !e.bg.Value {
 			return errors.New("Error: --service flag is only compatible with background mode")
@@ -427,6 +434,12 @@ func (e *serveEnv) runServeCombined(subcmd serveMode) execFunc {
 		if err != nil {
 			fmt.Fprintf(e.stderr(), "error: %v\n\n", err)
 			return errHelpFunc(subcmd)
+		}
+
+		if forDomain && (srvType != serveTypeHTTPS || srvPort != 443) {
+			// Certificates for custom domains are issued via ACME
+			// tls-alpn-01, which is always validated on port 443.
+			return errors.New("Error: --domain is only supported with --https=443")
 		}
 
 		if (srvType == serveTypeHTTP || srvType == serveTypeHTTPS) && e.proxyProtocol != 0 {
@@ -452,6 +465,12 @@ func (e *serveEnv) runServeCombined(subcmd serveMode) execFunc {
 		}
 		dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
 		magicDNSSuffix := st.CurrentTailnet.MagicDNSSuffix
+		if forDomain {
+			dnsName, err = validateFunnelDomain(e.domain, st)
+			if err != nil {
+				return fmt.Errorf("Error: invalid --domain: %w", err)
+			}
+		}
 
 		// set parent serve config to always be persisted
 		// at the top level, but a nested config might be
@@ -1039,6 +1058,7 @@ var (
 	msgRunningInBackground         = "%s started and running in the background."
 	msgRunningTunService           = "IPv4 and IPv6 traffic to %s is being routed to your operating system."
 	msgDisableProxy                = "To disable the proxy, run: tailscale %s --%s=%d off"
+	msgDisableDomainProxy          = "To disable the proxy, run: tailscale funnel --domain=%s off"
 	msgDisableServiceProxy         = "To disable the proxy, run: tailscale serve --service=%s --%s=%d off"
 	msgDisableServiceTun           = "To disable the service in TUN mode, run: tailscale serve --service=%s --tun off"
 	msgDisableService              = "To remove config for the service, run: tailscale serve clear %s"
@@ -1169,11 +1189,43 @@ func (e *serveEnv) messageForPort(sc *ipn.ServeConfig, st *ipnstate.Status, dnsN
 		output.WriteString(fmt.Sprintf(msgDisableServiceProxy, dnsName, srvType.String(), srvPort))
 		output.WriteString("\n")
 		output.WriteString(fmt.Sprintf(msgDisableService, dnsName))
+	} else if e.domain != "" {
+		output.WriteString(fmt.Sprintf(msgDisableDomainProxy, host))
 	} else {
 		output.WriteString(fmt.Sprintf(msgDisableProxy, subCmd, srvType.String(), srvPort))
 	}
 
 	return output.String()
+}
+
+// validateFunnelDomain validates and normalizes a custom (bring-your-own)
+// Funnel domain given via --domain. The domain must be a fully qualified,
+// non-wildcard DNS name outside the tailnet's own names: those already have
+// certificates provisioned by control and don't need --domain.
+//
+// The node obtains a certificate for the domain itself via ACME tls-alpn-01
+// over Funnel, so the domain's public DNS must direct traffic to Funnel.
+func validateFunnelDomain(domain string, st *ipnstate.Status) (string, error) {
+	d := strings.ToLower(strings.TrimSuffix(domain, "."))
+	if strings.HasPrefix(d, "*.") {
+		return "", errors.New("wildcard domains are not supported")
+	}
+	if _, err := netip.ParseAddr(d); err == nil {
+		return "", fmt.Errorf("%q is an IP address, not a domain name", domain)
+	}
+	if err := dnsname.ValidHostname(d); err != nil {
+		return "", err
+	}
+	if !strings.Contains(d, ".") {
+		return "", fmt.Errorf("%q is not a fully qualified domain name", domain)
+	}
+	if tn := st.CurrentTailnet; tn != nil && tn.MagicDNSSuffix != "" && dnsname.HasSuffix(d, tn.MagicDNSSuffix) {
+		return "", fmt.Errorf("%q is within your tailnet's domain %q; omit --domain to use this node's name", domain, tn.MagicDNSSuffix)
+	}
+	if d == "ts.net" || dnsname.HasSuffix(d, "ts.net") || slices.Contains(st.CertDomains, d) {
+		return "", fmt.Errorf("%q is a Tailscale-managed name; omit --domain to use this node's name", domain)
+	}
+	return d, nil
 }
 
 // isRemote reports whether the given destination from serve config
