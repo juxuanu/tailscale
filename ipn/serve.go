@@ -544,7 +544,11 @@ func (sc *ServeConfig) RemoveWebHandler(host string, port uint16, mounts []strin
 	}
 	if len(sc.Web[hp].Handlers) == 0 {
 		delete(sc.Web, hp)
-		delete(sc.TCP, port)
+		// Other hosts (e.g. a custom Funnel domain alongside the node's
+		// MagicDNS name) may still be served on this port.
+		if !sc.hasWebOnPort(port) {
+			delete(sc.TCP, port)
+		}
 		if cleanupFunnel {
 			delete(sc.AllowFunnel, hp) // disable funnel if no mounts remain for the port
 		}
@@ -560,6 +564,16 @@ func (sc *ServeConfig) RemoveWebHandler(host string, port uint16, mounts []strin
 	if len(sc.AllowFunnel) == 0 {
 		sc.AllowFunnel = nil
 	}
+}
+
+// hasWebOnPort reports whether sc.Web has a config for any host on port.
+func (sc *ServeConfig) hasWebOnPort(port uint16) bool {
+	for hp := range sc.Web {
+		if p, err := hp.Port(); err == nil && p == port {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveServiceWebHandler deletes the web handlers at all of the given mount points

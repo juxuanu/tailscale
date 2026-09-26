@@ -178,6 +178,7 @@ type serveEnv struct {
 	tun              bool                // redirect traffic to OS for service
 	allServices      bool                // apply config file to all services
 	acceptAppCaps    []peercap.Cap       // app capabilities to forward
+	domain           string              // custom (bring-your-own) Funnel domain
 
 	lc localServeClient // localClient interface, specific to serve
 	// optional stuff for tests:
