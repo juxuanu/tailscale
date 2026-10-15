@@ -130,6 +130,10 @@ var debugNetstack = envknob.RegisterBool("TS_DEBUG_NETSTACK")
 // holding thousands of proxied connections that drop at once — the 2h default
 // lets stuck goroutines accumulate faster than they clear. Value is a Go
 // duration, e.g. "60s". See tailscale/tailscale#4522.
+// netstackCongestionControl, if set, overrides netstack's TCP congestion
+// control algorithm, e.g. "cubic-lossdiff".
+var netstackCongestionControl = envknob.RegisterString("TS_NETSTACK_CC")
+
 var netstackKeepaliveIdle = envknob.RegisterDuration("TS_NETSTACK_KEEPALIVE_IDLE")
 
 // netstackKeepaliveInterval overrides the netstack default (75s) TCP keepalive
@@ -389,10 +393,15 @@ func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magi
 	// arithmetic (https://github.com/google/gvisor/issues/11632), which is
 	// why reno was pinned here; the CUBIC implementation has since been
 	// reworked to use float arithmetic with RFC 9438 target clamping.
-	cubicOpt := tcpip.CongestionControlOption("cubic")
-	tcpipErr := ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &cubicOpt)
+	cc := "cubic"
+	if v := netstackCongestionControl(); v != "" {
+		cc = v
+		logf("netstack: using %q TCP congestion control", cc)
+	}
+	ccOpt := tcpip.CongestionControlOption(cc)
+	tcpipErr := ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &ccOpt)
 	if tcpipErr != nil {
-		return nil, fmt.Errorf("could not set cubic congestion control: %v", tcpipErr)
+		return nil, fmt.Errorf("could not set %s congestion control: %v", cc, tcpipErr)
 	}
 	err := setTCPBufSizes(ns.ipstack)
 	if err != nil {
