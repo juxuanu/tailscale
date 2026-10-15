@@ -559,3 +559,5 @@ tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	github.com/stacklok/frizbee
 )
+
+replace gvisor.dev/gvisor => github.com/juxuanu/gvisor v0.0.0-20261015111944-10856b9412df
